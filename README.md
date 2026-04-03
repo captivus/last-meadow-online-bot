@@ -1,5 +1,11 @@
 # Last Meadow Online Bot
 
+[![PyPI version](https://img.shields.io/pypi/v/last-meadow-online-bot)](https://pypi.org/project/last-meadow-online-bot/)
+[![Python versions](https://img.shields.io/pypi/pyversions/last-meadow-online-bot)](https://pypi.org/project/last-meadow-online-bot/)
+[![License](https://img.shields.io/pypi/l/last-meadow-online-bot)](https://pypi.org/project/last-meadow-online-bot/)
+[![PyPI downloads](https://img.shields.io/pypi/dm/last-meadow-online-bot)](https://pypi.org/project/last-meadow-online-bot/)
+[![Publish](https://github.com/captivus/last-meadow-online-bot/actions/workflows/publish.yml/badge.svg)](https://github.com/captivus/last-meadow-online-bot/actions/workflows/publish.yml)
+
 An automation bot for [Last Meadow Online](https://discord.com/blog/last-meadow-online-announcement), Discord's April 2026 DBMMIRPG (Discord-Based Massively Multiplayer Incremental Role Playing Game). This bot automates the full gameplay loop for the **Ranger** class with the **Crafting** skill, helping contribute damage to the community dragon boss "Grass Toucher."
 
 I really don't get the point of this game, but I thought it would be trivial to automate it ... so I did!
