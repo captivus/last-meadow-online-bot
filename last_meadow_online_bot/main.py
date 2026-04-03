@@ -10,49 +10,43 @@ Flow:
 F8 to start, Escape to pause, Enter to resume, Ctrl+C to quit.
 """
 
+import argparse
+import sys
 import threading
 import time
-from pathlib import Path
 
 import cv2
 import numpy as np
 from PIL import ImageGrab
 from pynput import keyboard, mouse
 
+from .config import (
+    compute_all_buttons,
+    compute_all_regions,
+    compute_target_thresholds,
+    get_template_dir,
+    load_config,
+)
 
-TEMPLATE_DIR = Path(__file__).parent / "templates"
 MATCH_THRESHOLD = 0.7
 KEY_DELAY = 0.05
 ADVENTURE_CLICK_INTERVAL = 0.02
 POLL_INTERVAL = 0.5
 HOTKEY = keyboard.Key.f8
 
-# Screen regions (y1, y2, x1, x2) for 3440x1440, game on left half (1720x1440)
-ARROW_REGION = (690, 810, 400, 1250)
-CONTINUE_REGION = (800, 1000, 600, 1100)
-CRAFT_BUTTON_REGION = (1340, 1440, 1100, 1420)
-CRAFT_COOLDOWN_REGION = (1408, 1425, 1335, 1405)
-BATTLE_BUTTON_REGION = (1340, 1440, 1400, 1700)
-BATTLE_COOLDOWN_REGION = (1405, 1425, 1620, 1700)
-BATTLE_ARENA_REGION = (100, 1300, 60, 1560)  # game area excluding UI corners (settings/X/back)
-BACK_BUTTON_REGION = (35, 90, 5, 60)  # "<" button in top-left, present during minigames
 
-# Button centers (absolute screen coordinates)
-ADVENTURE_BUTTON_X = 923
-ADVENTURE_BUTTON_Y = 1383
-BATTLE_BUTTON_X = 1549
-BATTLE_BUTTON_Y = 1383
-
-
-def load_templates():
-    """Load all template images."""
+def load_templates(config):
+    """Load template images from the calibrated template directory."""
+    template_dir = get_template_dir(config=config)
     templates = {}
+
     for name in ["up", "down", "left", "right", "continue", "craft_button", "battle_button"]:
-        path = TEMPLATE_DIR / f"{name}.png"
+        path = template_dir / f"{name}.png"
         img = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
         if img is None:
             raise FileNotFoundError(f"Template not found: {path}")
         templates[name] = img
+
     return templates
 
 
@@ -65,6 +59,9 @@ def capture_region(region):
 
 def find_template(screen, template, threshold=MATCH_THRESHOLD):
     """Find best match location for a template. Returns (x, y, confidence) or None."""
+    if template.shape[0] > screen.shape[0] or template.shape[1] > screen.shape[1]:
+        return None
+
     result = cv2.matchTemplate(
         image=screen,
         templ=template,
@@ -82,6 +79,9 @@ def find_arrows(screen, templates):
     matches = []
 
     for direction, template in arrow_templates.items():
+        if template.shape[0] > screen.shape[0] or template.shape[1] > screen.shape[1]:
+            continue
+
         result = cv2.matchTemplate(
             image=screen,
             templ=template,
@@ -100,11 +100,15 @@ def find_arrows(screen, templates):
     return [direction for _, direction in deduplicated]
 
 
-def find_target(screen):
+def find_target(screen, target_thresholds):
     """Find a bullseye target in the battle screen using circular blob detection.
 
     Returns (center_x, center_y) relative to the screen region, or None.
     """
+    min_px = target_thresholds["min_px"]
+    max_px = target_thresholds["max_px"]
+    min_area = target_thresholds["min_area"]
+
     _, thresh = cv2.threshold(src=screen, thresh=100, maxval=255, type=cv2.THRESH_BINARY_INV)
     contours, _ = cv2.findContours(
         image=thresh,
@@ -120,15 +124,14 @@ def find_target(screen):
         area = cv2.contourArea(contour=c)
         perimeter = cv2.arcLength(curve=c, closed=True)
 
-        if perimeter == 0 or area < 50:
+        if perimeter == 0 or area < min_area:
             continue
-        if w < 10 or h < 10 or w > 80 or h > 80:
+        if w < min_px or h < min_px or w > max_px or h > max_px:
             continue
 
         circularity = 4 * np.pi * area / (perimeter ** 2)
         aspect_ratio = w / h if h > 0 else 0
 
-        # Target is circular: high circularity and roughly square aspect ratio
         if circularity > 0.6 and 0.7 < aspect_ratio < 1.4:
             if circularity > best_circularity:
                 best_circularity = circularity
@@ -185,31 +188,27 @@ def cooldown_is_done(region):
     return dark_ratio < 0.03
 
 
-def in_minigame():
-    """Detect if we're in a minigame screen by checking for the back button '<'.
-
-    The back button appears in the top-left during battle and craft minigames,
-    but not on the main screen.
-    """
-    screen = capture_region(BACK_BUTTON_REGION)
+def in_minigame(regions):
+    """Detect if we're in a minigame screen by checking for the back button '<'."""
+    screen = capture_region(regions["back_button"])
     dark_pixels = np.sum(screen < 50)
     total_pixels = screen.size
     return dark_pixels / total_pixels > 0.1
 
 
-def detect_state(templates):
+def detect_state(templates, regions, target_thresholds):
     """Detect which screen the game is on.
 
     Returns one of: 'main', 'anvil', 'success', 'battle', 'unknown'
     """
     # Check for arrows (anvil screen)
-    arrow_screen = capture_region(ARROW_REGION)
+    arrow_screen = capture_region(regions["arrow"])
     arrows = find_arrows(screen=arrow_screen, templates=templates)
     if len(arrows) >= 3:
         return "anvil", arrows
 
     # Check for Continue button (success screen — shared by craft and battle)
-    continue_screen = capture_region(CONTINUE_REGION)
+    continue_screen = capture_region(regions["continue"])
     match = find_template(
         screen=continue_screen,
         template=templates["continue"],
@@ -218,7 +217,7 @@ def detect_state(templates):
         return "success", match
 
     # Check for Craft button (main screen)
-    craft_screen = capture_region(CRAFT_BUTTON_REGION)
+    craft_screen = capture_region(regions["craft_button"])
     match = find_template(
         screen=craft_screen,
         template=templates["craft_button"],
@@ -228,26 +227,29 @@ def detect_state(templates):
 
     # If no main screen buttons found, check if we're in a minigame (back button present)
     # If we're in a minigame but no arrows and no continue, it must be battle
-    if in_minigame():
-        battle_screen = capture_region(BATTLE_ARENA_REGION)
-        target = find_target(screen=battle_screen)
+    if in_minigame(regions=regions):
+        battle_screen = capture_region(regions["battle_arena"])
+        target = find_target(screen=battle_screen, target_thresholds=target_thresholds)
         return "battle", target
 
     return "unknown", None
 
 
-def adventure_click_burst(running_event, duration=2.0):
+def adventure_click_burst(running_event, buttons, duration=2.0):
     """Rapid-click the Adventure button for a burst, then return to check state."""
+    adv_x, adv_y = buttons["adventure"]
     end_time = time.monotonic() + duration
     while time.monotonic() < end_time and running_event.is_set():
-        click_absolute(x=ADVENTURE_BUTTON_X, y=ADVENTURE_BUTTON_Y)
+        click_absolute(x=adv_x, y=adv_y)
         time.sleep(ADVENTURE_CLICK_INTERVAL)
 
 
-def run_battle(running_event, templates):
+def run_battle(running_event, templates, regions, target_thresholds):
     """Rapidly scan for and click targets during battle."""
     print("[Battle] Hunting targets...")
     misses = 0
+    same_spot_count = 0
+    last_click_pos = None
     last_continue_check = time.monotonic()
 
     while running_event.is_set() and misses < 20:
@@ -255,7 +257,7 @@ def run_battle(running_event, templates):
         now = time.monotonic()
         if now - last_continue_check > 1.0:
             last_continue_check = now
-            continue_screen = capture_region(CONTINUE_REGION)
+            continue_screen = capture_region(regions["continue"])
             match = find_template(
                 screen=continue_screen,
                 template=templates["continue"],
@@ -264,14 +266,27 @@ def run_battle(running_event, templates):
                 print("[Battle] Battle over, found Continue.")
                 return
 
-        screen = capture_region(BATTLE_ARENA_REGION)
-        target = find_target(screen=screen)
+        screen = capture_region(regions["battle_arena"])
+        target = find_target(screen=screen, target_thresholds=target_thresholds)
 
         if target:
             center_x, center_y = target
-            y1, _, x1, _ = BATTLE_ARENA_REGION
+            y1, _, x1, _ = regions["battle_arena"]
             abs_x = x1 + center_x
             abs_y = y1 + center_y
+
+            # If we keep clicking the same spot, it's a false positive
+            if last_click_pos and abs(abs_x - last_click_pos[0]) < 10 and abs(abs_y - last_click_pos[1]) < 10:
+                same_spot_count += 1
+                if same_spot_count > 3:
+                    # Treat repeated same-spot clicks as a miss
+                    misses += 1
+                    time.sleep(0.05)
+                    continue
+            else:
+                same_spot_count = 0
+
+            last_click_pos = (abs_x, abs_y)
             click_absolute(x=abs_x, y=abs_y)
             print(f"[Battle] Clicked target at ({abs_x}, {abs_y})")
             misses = 0
@@ -283,14 +298,22 @@ def run_battle(running_event, templates):
     print("[Battle] Battle complete or no targets found.")
 
 
-def run_loop(running_event):
+def run_loop(running_event, config):
     """Main automation loop."""
-    templates = load_templates()
+    regions = compute_all_regions(config=config)
+    buttons = compute_all_buttons(config=config)
+    target_thresholds = compute_target_thresholds(config=config)
+    templates = load_templates(config=config)
+
     print("Bot started. Detecting game state...")
     adventuring = False
 
     while running_event.is_set():
-        state, data = detect_state(templates=templates)
+        state, data = detect_state(
+            templates=templates,
+            regions=regions,
+            target_thresholds=target_thresholds,
+        )
 
         if state == "anvil":
             adventuring = False
@@ -303,12 +326,16 @@ def run_loop(running_event):
         elif state == "battle":
             adventuring = False
             if data:
-                # Already found a target during detection
                 center_x, center_y = data
-                y1, _, x1, _ = BATTLE_ARENA_REGION
+                y1, _, x1, _ = regions["battle_arena"]
                 click_absolute(x=x1 + center_x, y=y1 + center_y)
-                print(f"[Battle] Clicked first target")
-            run_battle(running_event=running_event, templates=templates)
+                print("[Battle] Clicked first target")
+            run_battle(
+                running_event=running_event,
+                templates=templates,
+                regions=regions,
+                target_thresholds=target_thresholds,
+            )
             time.sleep(1.0)
 
         elif state == "success":
@@ -319,25 +346,27 @@ def run_loop(running_event):
             click_y = y + template_h // 2
             print(f"[Success] Clicking Continue (confidence: {confidence:.2f})")
             click_at(
-                region=CONTINUE_REGION,
+                region=regions["continue"],
                 x_offset=click_x,
                 y_offset=click_y,
             )
             time.sleep(1.0)
 
         elif state == "main":
-            craft_ready = cooldown_is_done(region=CRAFT_COOLDOWN_REGION)
-            battle_ready = cooldown_is_done(region=BATTLE_COOLDOWN_REGION)
+            craft_ready = cooldown_is_done(region=regions["craft_cooldown"])
+            battle_ready = cooldown_is_done(region=regions["battle_cooldown"])
 
             if craft_ready:
                 adventuring = False
+                craft_x, craft_y = buttons["craft"]
                 print("[Main] Craft ready, clicking Craft")
-                click_absolute(x=1220, y=1383)
+                click_absolute(x=craft_x, y=craft_y)
                 time.sleep(1.5)
             elif battle_ready:
                 adventuring = False
+                battle_x, battle_y = buttons["battle"]
                 print("[Main] Battle ready, clicking Battle")
-                click_absolute(x=BATTLE_BUTTON_X, y=BATTLE_BUTTON_Y)
+                click_absolute(x=battle_x, y=battle_y)
                 time.sleep(1.5)
             else:
                 if not adventuring:
@@ -345,6 +374,7 @@ def run_loop(running_event):
                     adventuring = True
                 adventure_click_burst(
                     running_event=running_event,
+                    buttons=buttons,
                     duration=2.0,
                 )
                 continue
@@ -358,6 +388,30 @@ def run_loop(running_event):
 
 
 def main():
+    parser = argparse.ArgumentParser(
+        description="Automated game bot for Last Meadow Online",
+    )
+    parser.add_argument(
+        "--calibrate",
+        action="store_true",
+        help="Run the calibration wizard to configure your screen layout",
+    )
+    args = parser.parse_args()
+
+    if args.calibrate:
+        from .calibrate import run_calibration
+        success = run_calibration()
+        sys.exit(0 if success else 1)
+
+    # Load config
+    config = load_config()
+    if config is None:
+        print("No calibration found. Run with --calibrate first:")
+        print()
+        print("  last-meadow-online-bot --calibrate")
+        print()
+        sys.exit(1)
+
     print("Game bot ready. F8 to start, Escape to pause, Enter to resume, Ctrl+C to quit.")
 
     running_event = threading.Event()
@@ -369,7 +423,7 @@ def main():
         running_event.set()
         bot_thread = threading.Thread(
             target=run_loop,
-            args=(running_event,),
+            args=(running_event, config),
             daemon=True,
         )
         bot_thread.start()

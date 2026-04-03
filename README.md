@@ -26,7 +26,6 @@ After each craft or battle, the bot automatically clicks the Continue button on 
 
 - Python 3.11+
 - [uv](https://docs.astral.sh/uv/) for dependency management
-- Game running on the left half of a 3440x1440 display
 
 ### Platform Compatibility
 
@@ -36,30 +35,54 @@ This bot was built and tested on **Linux (X11)**. The underlying dependencies (`
 |----------|-----------------|------------------------------|-------|
 | **Linux (X11)** | X11 | X11 | Tested and working |
 | **Linux (Wayland)** | Requires `ydotool` | Requires alternative | Not supported as-is |
-| **Windows** | Win32 API | Native | Recalibrate screen regions |
-| **macOS** | Quartz | Native | Requires accessibility permissions (System Settings > Privacy & Security > Accessibility). Retina displays capture at 2x resolution, so all coordinates and templates would need to be doubled or captures downscaled. |
+| **Windows** | Win32 API | Native | Run `--calibrate` to configure |
+| **macOS** | Quartz | Native | Requires accessibility permissions (System Settings > Privacy & Security > Accessibility). Run `--calibrate` to configure. |
 
-Regardless of platform, all screen region coordinates and templates are calibrated for a specific display setup (3440x1440, game on left half). Any different display configuration requires recalibration -- see [Display Configuration](#display-configuration).
+The bot adapts to any screen layout via its calibration wizard -- no hardcoded screen coordinates.
 
 ## Setup
 
 ```bash
-git clone <repo-url>
+git clone git@github.com:captivus/last-meadow-online-bot.git
 cd last-meadow-online-bot
 uv sync
 ```
 
-## Usage
-
-```bash
-uv run last-meadow-online-bot
-```
-
-Or install globally and run directly:
+Or install from PyPI:
 
 ```bash
 uv tool install last-meadow-online-bot
+```
+
+### Calibration
+
+Before first use, run the calibration wizard to tell the bot where your game window is:
+
+```bash
+last-meadow-online-bot --calibrate
+```
+
+The wizard walks you through 6 steps:
+
+1. Position your mouse at the **top-left** corner of the game area, press Enter
+2. Position your mouse at the **bottom-right** corner, press Enter
+3. Button templates are extracted directly from your live screen
+4. Detection is verified against the current screen
+5. Click Craft in the game -- arrow templates are extracted from the crafting screen
+6. Complete the craft -- Continue template is extracted from the success screen
+
+Config and templates are saved to `~/.config/last-meadow-online-bot/`. You only need to calibrate once. Re-run if you move or resize the game window.
+
+## Usage
+
+```bash
 last-meadow-online-bot
+```
+
+Or during development:
+
+```bash
+uv run last-meadow-online-bot
 ```
 
 ### Controls
@@ -111,50 +134,42 @@ stateDiagram-v2
 
 **Lesson learned -- state detection order matters.** The battle success screen still has the back button "<" visible, which is also how we detect the active battle screen. If the battle check runs before the Continue check, the bot gets stuck on the success screen thinking it's still in battle. The solution: always check for Continue *before* checking for battle in the detection order.
 
-### 3. Extract Templates from Screenshots
+### 3. Extract Templates from the Live Screen
 
-For each visual element the bot needs to recognize, we captured screenshots of the game and cropped individual templates. These templates are stored in `templates/` and used for OpenCV `matchTemplate` operations.
+For each visual element the bot needs to recognize, the calibration wizard extracts templates directly from the user's live screen. This ensures templates match the exact resolution, aspect ratio, and rendering of the user's setup.
 
 The crafting screen showing the arrow sequence that we extracted individual arrow templates from:
 
 ![Crafting anvil screen](docs/screenshots/crafting-anvil.png)
 
-**Templates extracted:**
-- `up.png`, `down.png`, `left.png`, `right.png` -- individual arrow icons from the crafting screen
+**Templates extracted during calibration:**
+- `up.png`, `down.png`, `left.png`, `right.png` -- individual arrow icons, classified by direction using center-of-mass analysis
 - `continue.png` -- the Continue button from the success screen
 - `craft_button.png` -- the Craft button from the main screen bottom bar
 - `battle_button.png` -- the Battle button from the main screen bottom bar
 
-**Process for extracting templates:**
-1. Screenshot the game in each state
-2. Use OpenCV contour detection to find bounding boxes of UI elements
-3. Crop each element with a small padding
-4. Verify the template matches correctly against the live screen using `matchTemplate`
-
-**Lesson learned -- extract templates from the live screen, not reference screenshots.** Our initial arrow templates were cropped from a high-resolution screenshot the game provided. When we ran template matching against the actual screen capture (via `ImageGrab`), the match confidence was poor because the resolutions differed slightly (1718x1403 screenshot vs 1720x1440 live capture). Re-extracting templates from a live `ImageGrab` screenshot fixed the issue.
+**Lesson learned -- always extract templates from the live screen, not reference screenshots.** Our initial approach was to ship pre-cropped templates and scale them to match the user's resolution. This failed because the game doesn't maintain a fixed aspect ratio across different window sizes -- the internal layout adapts, so templates scaled by different X and Y factors didn't match the actual rendering. Extracting fresh templates during calibration from `ImageGrab` captures solved this completely.
 
 ### 4. Define Screen Regions
 
 Rather than scanning the entire screen every frame, we defined tight bounding boxes for each area of interest. This improves performance and reduces false positives.
 
-Regions are defined as `(y1, y2, x1, x2)` tuples in screen coordinates:
+Regions are stored as **relative coordinates** (fractions of the game window dimensions) and converted to absolute pixel positions at runtime using the calibrated game window bounds. The reference values below are from the original 1720x1408 development setup:
 
-| Region | Purpose | Coordinates |
-|--------|---------|-------------|
-| `ARROW_REGION` | Where arrow icons appear during crafting | `(690, 810, 400, 1250)` |
-| `CONTINUE_REGION` | Where the Continue button appears | `(800, 1000, 600, 1100)` |
-| `CRAFT_BUTTON_REGION` | Craft button in the bottom bar | `(1340, 1440, 1100, 1420)` |
-| `CRAFT_COOLDOWN_REGION` | Timer text below Craft button | `(1408, 1425, 1335, 1405)` |
-| `BATTLE_BUTTON_REGION` | Battle button in the bottom bar | `(1340, 1440, 1400, 1700)` |
-| `BATTLE_COOLDOWN_REGION` | Timer text below Battle button | `(1405, 1425, 1620, 1700)` |
-| `BATTLE_ARENA_REGION` | Where targets appear during battle | `(100, 1300, 60, 1560)` |
-| `BACK_BUTTON_REGION` | Back button in top-left during minigames | `(35, 90, 5, 60)` |
+| Region | Purpose | Reference Coordinates |
+|--------|---------|----------------------|
+| `arrow` | Where arrow icons appear during crafting | `(0.47, 0.55, 0.23, 0.73)` |
+| `continue` | Where the Continue button appears | `(0.55, 0.69, 0.35, 0.64)` |
+| `craft_button` | Craft button in the bottom bar | `(0.93, 1.00, 0.64, 0.83)` |
+| `craft_cooldown` | Timer text below Craft button | `(0.98, 0.99, 0.78, 0.82)` |
+| `battle_button` | Battle button in the bottom bar | `(0.93, 1.00, 0.81, 0.99)` |
+| `battle_cooldown` | Timer text below Battle button | `(0.98, 0.99, 0.94, 0.99)` |
+| `battle_arena` | Where targets appear during battle | `(0.05, 0.90, 0.03, 0.91)` |
+| `back_button` | Back button in top-left during minigames | `(0.00, 0.04, 0.00, 0.03)` |
 
-**All coordinates assume the game is running on the left half of a 3440x1440 display (1720x1440 game window).**
+**Lesson learned -- account for window chrome.** The game window has a title bar/tab bar at the top (32px in our setup). Our initial attempt to detect the battle score counter in the top-left failed because the coordinates were based on the game screenshot (which doesn't include the title bar), not the actual screen position. The calibration wizard handles this by having the user point at the actual game content corners.
 
-**Lesson learned -- account for window chrome.** The game window has a 32px title bar/tab bar at the top. Our initial attempt to detect the battle score counter ("0/10") in the top-left failed because the coordinates were based on the game screenshot (which doesn't include the title bar), not the actual screen position. Always verify regions against live `ImageGrab` captures, not standalone screenshots.
-
-**Lesson learned -- cooldown timer regions must be surgically precise.** Our first cooldown detection region captured part of the Craft button's border lines, which added ~7.5% dark pixels even when no timer was present. This caused the bot to think the cooldown was always active. The fix was to use a tiny region (`1408, 1425, 1335, 1405`) positioned entirely inside the button, below the text, where only the timer digits appear. The separation became clean: ~0% dark without timer, ~10-12% dark with timer.
+**Lesson learned -- cooldown timer regions must be surgically precise.** Our first cooldown detection region captured part of the Craft button's border lines, which added ~7.5% dark pixels even when no timer was present. This caused the bot to think the cooldown was always active. The fix was to use a tiny region positioned entirely inside the button, below the text, where only the timer digits appear. The separation became clean: ~0% dark without timer, ~10-12% dark with timer.
 
 ### 5. Implement Detection Strategies Per Element
 
@@ -164,7 +179,7 @@ Different UI elements require different detection approaches:
 
 **Pixel darkness ratio** (cooldown timers) -- best for detecting presence/absence of text in a known region. When the timer is visible, the region has ~10-18% dark pixels. When absent, ~0%. A threshold of 3% cleanly separates the two states.
 
-**Contour-based blob detection** (battle targets) -- best for elements that change size or position. The bullseye target is circular, so we threshold the image, find contours, and filter for high circularity (>0.6), square aspect ratio, and minimum size (10px). This detects targets from 32px down to about 12px diameter.
+**Contour-based blob detection** (battle targets) -- best for elements that change size or position. The bullseye target is circular, so we threshold the image, find contours, and filter for high circularity (>0.6), square aspect ratio, and minimum size. Detection thresholds scale proportionally with the game window size.
 
 Battle targets appear at various positions and sizes, shrinking over time:
 
@@ -174,9 +189,10 @@ Battle targets appear at various positions and sizes, shrinking over time:
 
 ![Battle target small](docs/screenshots/battle-target-small.png)
 
-**Lesson learned -- UI elements create false positive targets.** The settings gear icon in the top-right corner has a small circular sub-element (8x8px, circularity 0.86) that passed our target filter. Similarly, the battle success screen has small circular decorative elements (~9px) that kept triggering false detections, preventing the battle loop from exiting. Two fixes were needed:
-1. Exclude the UI corners from the battle scan area by tightening `BATTLE_ARENA_REGION`
-2. Increase the minimum contour size from 5px to 10px (area from 20 to 50), which filtered out these false positives while still detecting real targets (32px+)
+**Lesson learned -- UI elements create false positive targets.** Small circular elements (gear icon, decorative dots, text characters like "o") can pass the circularity filter. Three layers of defense were needed:
+1. Exclude the UI corners from the battle scan area by tightening the arena region
+2. Set minimum contour size high enough to filter small decorative elements while still catching real targets
+3. Detect when the bot clicks the same screen position repeatedly (a real target moves after being clicked, a false positive doesn't) and treat repeated same-spot clicks as misses
 
 ### 6. Handle Timing and Transitions
 
@@ -195,10 +211,10 @@ To automate a different class or skill combination:
 2. **Identify the minigame mechanic**:
    - **Paladin (Shield)** -- intercept falling projectiles by moving a shield. Would need motion tracking or rapid position detection.
    - **Priest (Tile Matching)** -- match groups of three identical tiles. Would need tile recognition and grid position mapping.
-3. **Extract new templates** from live screen captures (not standalone screenshots) for any new UI elements
+3. **Extract new templates** from live screen captures during calibration for any new UI elements
 4. **Add a new state** to `detect_state()` with appropriate detection logic, being mindful of detection order to avoid state confusion
 5. **Implement the minigame handler** (like `run_battle()` for archery), making sure it checks for exit conditions (Continue button) to avoid getting stuck
-6. **Adjust screen regions** if the minigame uses different areas of the screen, verifying against live captures and accounting for window chrome
+6. **Add new relative regions** to `config.py` if the minigame uses different areas of the screen
 
 The shared elements (Adventure button, cooldown detection, Continue button, state machine loop) remain the same across all class/skill combinations.
 
@@ -226,11 +242,13 @@ After hitting all 10 targets, the battle success screen appears with the same Co
 
 ## Display Configuration
 
-The bot is configured for a game window occupying the left half of a 3440x1440 display (1720x1440 game window). If your setup differs, you'll need to:
+The bot uses a calibration system to adapt to any screen layout:
 
-1. **Re-measure screen regions** -- all `*_REGION` constants at the top of `main.py` are pixel coordinates. Capture a screenshot using `ImageGrab.grab()` (not the game's own screenshot feature) and measure the bounding boxes for each UI element. Be aware of any title bar or window chrome offset.
-2. **Re-extract templates** -- crop fresh arrow, button, and Continue templates from your live screen captures and save them to `templates/`. Template sizes must match what `ImageGrab` captures, not what the game renders internally.
-3. **Update button center coordinates** -- `ADVENTURE_BUTTON_X/Y` and `BATTLE_BUTTON_X/Y` are absolute screen coordinates for click targets.
+1. **Relative coordinates** -- all UI regions are stored as fractions of the game window dimensions, not absolute pixel values. At runtime they're converted to screen pixels using the calibrated game bounds.
+2. **Live template extraction** -- during calibration, templates are captured directly from the user's screen at their native resolution and aspect ratio. No scaling or interpolation is needed.
+3. **Proportional thresholds** -- detection thresholds (e.g., minimum target size for battle) scale with the game window dimensions so they work at any resolution.
+
+Config is stored at `~/.config/last-meadow-online-bot/`. Re-run `last-meadow-online-bot --calibrate` if your game window changes.
 
 ## Dependencies
 
