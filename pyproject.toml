@@ -1,0 +1,11 @@
+[project]
+name = "last-meadow-online-bot"
+version = "0.1.0"
+description = "Automated game bot for Last Meadow Online"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "opencv-python-headless>=4.13.0.92",
+    "pillow>=12.2.0",
+    "pynput>=1.8.1",
+]
