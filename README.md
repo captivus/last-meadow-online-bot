@@ -46,7 +46,14 @@ uv sync
 ## Usage
 
 ```bash
-uv run python3 -u main.py
+uv run last-meadow-online-bot
+```
+
+Or install globally and run directly:
+
+```bash
+uv tool install last-meadow-online-bot
+last-meadow-online-bot
 ```
 
 ### Controls
