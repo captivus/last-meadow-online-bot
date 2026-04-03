@@ -3,7 +3,7 @@
 [![PyPI version](https://img.shields.io/pypi/v/last-meadow-online-bot)](https://pypi.org/project/last-meadow-online-bot/)
 [![Python versions](https://img.shields.io/pypi/pyversions/last-meadow-online-bot)](https://pypi.org/project/last-meadow-online-bot/)
 [![License](https://img.shields.io/pypi/l/last-meadow-online-bot)](https://pypi.org/project/last-meadow-online-bot/)
-[![PyPI downloads](https://img.shields.io/pypi/dm/last-meadow-online-bot)](https://pypi.org/project/last-meadow-online-bot/)
+[![Downloads](https://img.shields.io/pypi/dm/last-meadow-online-bot)](https://pypi.org/project/last-meadow-online-bot/)
 [![Publish](https://github.com/captivus/last-meadow-online-bot/actions/workflows/publish.yml/badge.svg)](https://github.com/captivus/last-meadow-online-bot/actions/workflows/publish.yml)
 
 An automation bot for [Last Meadow Online](https://discord.com/blog/last-meadow-online-announcement), Discord's April 2026 DBMMIRPG (Discord-Based Massively Multiplayer Incremental Role Playing Game). This bot automates the full gameplay loop for the **Ranger** class with the **Crafting** skill, helping contribute damage to the community dragon boss "Grass Toucher."
@@ -96,13 +96,13 @@ uv run last-meadow-online-bot
 
 ## Automation Methodology
 
-This section documents the general approach used to automate the game, including the pitfalls we encountered and how we solved them. The same methodology can be applied to automate other class/skill combinations (Paladin with shield minigame, Priest with tile-matching, etc.).
+This section documents the general approach used to automate the game, including pitfalls I encountered and how I solved them. The same methodology can be applied to automate other class/skill combinations (Paladin with shield minigame, Priest with tile-matching, etc.).
 
 ### 1. Identify Game States
 
-The game has a finite set of screens the player moves through. Each screen has unique visual markers that distinguish it from the others. We identified these states by screenshotting each screen during gameplay:
+The game has a finite set of screens the player moves through. Each screen has unique visual markers that distinguish it from the others. I identified these states by screenshotting each screen during gameplay:
 
-| State | Visual Marker | How We Detect It |
+| State | Visual Marker | How It's Detected |
 |-------|--------------|-----------------|
 | Main screen | Adventure/Craft/Battle buttons at the bottom | Template match on the Craft button |
 | Crafting (Anvil) | Row of arrow icons in the center | Template match on arrow icons (up/down/left/right) |
@@ -115,7 +115,7 @@ The main screen with the three action buttons and cooldown timer:
 
 ### 2. Map the State Machine
 
-The game follows a predictable loop. We mapped each state to the action the bot should take and which state it transitions to:
+The game follows a predictable loop. I mapped each state to the action the bot should take and which state it transitions to:
 
 ```mermaid
 stateDiagram-v2
@@ -138,7 +138,7 @@ stateDiagram-v2
 
 For each visual element the bot needs to recognize, the calibration wizard extracts templates directly from the user's live screen. This ensures templates match the exact resolution, aspect ratio, and rendering of the user's setup.
 
-The crafting screen showing the arrow sequence that we extracted individual arrow templates from:
+The crafting screen showing the arrow sequence that individual arrow templates are extracted from:
 
 ![Crafting anvil screen](docs/screenshots/crafting-anvil.png)
 
@@ -148,11 +148,11 @@ The crafting screen showing the arrow sequence that we extracted individual arro
 - `craft_button.png` -- the Craft button from the main screen bottom bar
 - `battle_button.png` -- the Battle button from the main screen bottom bar
 
-**Lesson learned -- always extract templates from the live screen, not reference screenshots.** Our initial approach was to ship pre-cropped templates and scale them to match the user's resolution. This failed because the game doesn't maintain a fixed aspect ratio across different window sizes -- the internal layout adapts, so templates scaled by different X and Y factors didn't match the actual rendering. Extracting fresh templates during calibration from `ImageGrab` captures solved this completely.
+**Lesson learned -- always extract templates from the live screen, not reference screenshots.** My initial approach was to ship pre-cropped templates and scale them to match the user's resolution. This failed because the game doesn't maintain a fixed aspect ratio across different window sizes -- the internal layout adapts, so templates scaled by different X and Y factors didn't match the actual rendering. Extracting fresh templates during calibration from `ImageGrab` captures solved this completely.
 
 ### 4. Define Screen Regions
 
-Rather than scanning the entire screen every frame, we defined tight bounding boxes for each area of interest. This improves performance and reduces false positives.
+Rather than scanning the entire screen every frame, I defined tight bounding boxes for each area of interest. This improves performance and reduces false positives.
 
 Regions are stored as **relative coordinates** (fractions of the game window dimensions) and converted to absolute pixel positions at runtime using the calibrated game window bounds. The reference values below are from the original 1720x1408 development setup:
 
@@ -167,9 +167,9 @@ Regions are stored as **relative coordinates** (fractions of the game window dim
 | `battle_arena` | Where targets appear during battle | `(0.05, 0.90, 0.03, 0.91)` |
 | `back_button` | Back button in top-left during minigames | `(0.00, 0.04, 0.00, 0.03)` |
 
-**Lesson learned -- account for window chrome.** The game window has a title bar/tab bar at the top (32px in our setup). Our initial attempt to detect the battle score counter in the top-left failed because the coordinates were based on the game screenshot (which doesn't include the title bar), not the actual screen position. The calibration wizard handles this by having the user point at the actual game content corners.
+**Lesson learned -- account for window chrome.** The game window has a title bar/tab bar at the top (32px in my setup). My initial attempt to detect the battle score counter in the top-left failed because the coordinates were based on the game screenshot (which doesn't include the title bar), not the actual screen position. The calibration wizard handles this by having the user point at the actual game content corners.
 
-**Lesson learned -- cooldown timer regions must be surgically precise.** Our first cooldown detection region captured part of the Craft button's border lines, which added ~7.5% dark pixels even when no timer was present. This caused the bot to think the cooldown was always active. The fix was to use a tiny region positioned entirely inside the button, below the text, where only the timer digits appear. The separation became clean: ~0% dark without timer, ~10-12% dark with timer.
+**Lesson learned -- cooldown timer regions must be surgically precise.** My first cooldown detection region captured part of the Craft button's border lines, which added ~7.5% dark pixels even when no timer was present. This caused the bot to think the cooldown was always active. The fix was to use a tiny region positioned entirely inside the button, below the text, where only the timer digits appear. The separation became clean: ~0% dark without timer, ~10-12% dark with timer.
 
 ### 5. Implement Detection Strategies Per Element
 
