@@ -10,6 +10,8 @@ An automation bot for [Last Meadow Online](https://discord.com/blog/last-meadow-
 
 I really don't get the point of this game, but I thought it would be trivial to automate it ... so I did!
 
+[![Demo](https://raw.githubusercontent.com/captivus/last-meadow-online-bot/main/demo/demo.gif)](https://raw.githubusercontent.com/captivus/last-meadow-online-bot/main/demo/last-meadow-online-demo-2026-04-03_18.55.54.mp4)
+
 There's more extension needed to fully automate the other classes that I didn't play, but I'll leave that to someone who cares to contribute.
 
 ## What It Automates

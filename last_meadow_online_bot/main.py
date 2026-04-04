@@ -21,11 +21,14 @@ from PIL import ImageGrab
 from pynput import keyboard, mouse
 
 from .config import (
+    BUNDLED_TEMPLATE_DIR,
+    RELATIVE_REGIONS,
     compute_all_buttons,
     compute_all_regions,
     compute_target_thresholds,
     get_template_dir,
     load_config,
+    save_config,
 )
 
 MATCH_THRESHOLD = 0.7
@@ -36,16 +39,32 @@ HOTKEY = keyboard.Key.f8
 
 
 def load_templates(config):
-    """Load template images from the calibrated template directory."""
+    """Load template images.
+
+    Button and Continue templates come from calibration (live screen captures).
+    Arrow reference templates come from the bundled defaults (used for
+    classification at runtime, not direct matching).
+    """
     template_dir = get_template_dir(config=config)
     templates = {}
 
-    for name in ["up", "down", "left", "right", "continue", "craft_button", "battle_button"]:
+    # Button and Continue templates from calibration
+    for name in ["continue", "craft_button", "battle_button"]:
         path = template_dir / f"{name}.png"
         img = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
         if img is None:
             raise FileNotFoundError(f"Template not found: {path}")
         templates[name] = img
+
+    # Arrow reference templates from bundled defaults (for classification)
+    arrow_refs = {}
+    for direction in ["up", "down", "left", "right"]:
+        path = BUNDLED_TEMPLATE_DIR / f"{direction}.png"
+        img = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+        if img is None:
+            raise FileNotFoundError(f"Bundled template not found: {path}")
+        arrow_refs[direction] = img
+    templates["arrow_refs"] = arrow_refs
 
     return templates
 
@@ -73,31 +92,84 @@ def find_template(screen, template, threshold=MATCH_THRESHOLD):
     return None
 
 
-def find_arrows(screen, templates):
-    """Find all arrow matches in the screen region, sorted left to right."""
-    arrow_templates = {d: templates[d] for d in ["up", "down", "left", "right"]}
-    matches = []
+def classify_arrow(arrow_img, arrow_refs):
+    """Classify an arrow image by matching against bundled reference templates.
 
-    for direction, template in arrow_templates.items():
-        if template.shape[0] > screen.shape[0] or template.shape[1] > screen.shape[1]:
-            continue
+    Resizes the arrow to each reference template's dimensions and picks
+    the best match. This works at any resolution since size is normalized.
+    """
+    best_direction = None
+    best_score = -1
 
+    for direction, ref in arrow_refs.items():
+        resized = cv2.resize(
+            src=arrow_img,
+            dsize=(ref.shape[1], ref.shape[0]),
+            interpolation=cv2.INTER_AREA,
+        )
         result = cv2.matchTemplate(
-            image=screen,
-            templ=template,
+            image=resized,
+            templ=ref,
             method=cv2.TM_CCOEFF_NORMED,
         )
-        locations = np.where(result >= MATCH_THRESHOLD)
-        for x, y in zip(locations[1], locations[0]):
-            matches.append((x, direction))
+        score = result[0, 0]
+        if score > best_score:
+            best_score = score
+            best_direction = direction
 
-    matches.sort(key=lambda m: m[0])
+    return best_direction, best_score
+
+
+def find_arrows(screen, templates):
+    """Find arrows using contour detection and classify each by shape.
+
+    Instead of template matching against the screen (which requires
+    resolution-matched templates), this finds arrow-shaped contours
+    and classifies each by comparing against bundled reference templates.
+    """
+    arrow_refs = templates["arrow_refs"]
+    height, width = screen.shape[:2]
+    min_size = height * 0.3
+
+    _, thresh = cv2.threshold(
+        src=screen,
+        thresh=100,
+        maxval=255,
+        type=cv2.THRESH_BINARY_INV,
+    )
+    contours, _ = cv2.findContours(
+        image=thresh,
+        mode=cv2.RETR_EXTERNAL,
+        method=cv2.CHAIN_APPROX_SIMPLE,
+    )
+
+    arrows = []
+    for c in contours:
+        x, y, w, h = cv2.boundingRect(array=c)
+        if w < min_size or h < min_size:
+            continue
+
+        arrow_img = screen[y:y + h, x:x + w]
+        direction, score = classify_arrow(
+            arrow_img=arrow_img,
+            arrow_refs=arrow_refs,
+        )
+        # Only accept contours that actually look like arrows
+        if score >= 0.4:
+            arrows.append((x, direction, score))
+
+    # Sort left to right and deduplicate nearby matches (keep highest confidence)
+    arrows.sort(key=lambda a: a[0])
+    dedup_threshold = width * 0.05
     deduplicated = []
-    for x, direction in matches:
-        if not deduplicated or abs(x - deduplicated[-1][0]) > 30:
-            deduplicated.append((x, direction))
+    for x, direction, score in arrows:
+        if deduplicated and abs(x - deduplicated[-1][0]) < dedup_threshold:
+            if score > deduplicated[-1][2]:
+                deduplicated[-1] = (x, direction, score)
+        else:
+            deduplicated.append((x, direction, score))
 
-    return [direction for _, direction in deduplicated]
+    return [direction for _, direction, _ in deduplicated]
 
 
 def find_target(screen, target_thresholds):
@@ -379,12 +451,81 @@ def run_loop(running_event, config):
                 )
                 continue
 
-        else:
-            pass
+        elif state == "unknown":
+            if adventuring:
+                adventuring = False
+            print("[Unknown] Could not detect game state -- is the game visible?")
 
         time.sleep(POLL_INTERVAL)
 
     print("Bot stopped.")
+
+
+def verify_window_position(config):
+    """Check if the game window is where we expect it.
+
+    Scans the bottom half of the screen for the craft button template.
+    Compares the found position to the expected position to determine
+    if the window is in place, moved, or resized/missing.
+
+    Returns:
+        - ("ok", config) if the window is in the expected position
+        - ("moved", updated_config) if the window moved but wasn't resized
+        - ("resized", None) if the window was resized or not found
+    """
+    template_dir = get_template_dir(config=config)
+    craft_tmpl = cv2.imread(
+        str(template_dir / "craft_button.png"),
+        cv2.IMREAD_GRAYSCALE,
+    )
+    if craft_tmpl is None:
+        return "resized", None
+
+    tmpl_h, tmpl_w = craft_tmpl.shape[:2]
+
+    # Scan the bottom half of the full screen for the craft button
+    full_screen = ImageGrab.grab()
+    screen_w, screen_h = full_screen.size
+    strip_y1 = int(screen_h * 0.5)
+    strip = full_screen.crop((0, strip_y1, screen_w, screen_h))
+    strip_gray = cv2.cvtColor(src=np.array(strip), code=cv2.COLOR_RGB2GRAY)
+
+    if tmpl_h > strip_gray.shape[0] or tmpl_w > strip_gray.shape[1]:
+        return "resized", None
+
+    result = cv2.matchTemplate(
+        image=strip_gray,
+        templ=craft_tmpl,
+        method=cv2.TM_CCOEFF_NORMED,
+    )
+    _, max_val, _, max_loc = cv2.minMaxLoc(src=result)
+
+    if max_val < 0.5:
+        return "resized", None
+
+    # Compute where the game window must be based on where we found the button
+    rel_y1, _, rel_x1, _ = RELATIVE_REGIONS["craft_button"]
+    found_x = max_loc[0]
+    found_y = strip_y1 + max_loc[1]
+
+    new_game_x = int(found_x - rel_x1 * config["game_width"])
+    new_game_y = int(found_y - rel_y1 * config["game_height"])
+
+    # Check if position changed significantly (more than 5px)
+    dx = abs(new_game_x - config["game_x"])
+    dy = abs(new_game_y - config["game_y"])
+
+    if dx <= 5 and dy <= 5:
+        return "ok", config
+
+    updated_config = {
+        "game_x": new_game_x,
+        "game_y": new_game_y,
+        "game_width": config["game_width"],
+        "game_height": config["game_height"],
+    }
+
+    return "moved", updated_config
 
 
 def main():
@@ -412,6 +553,36 @@ def main():
         print()
         sys.exit(1)
 
+    # Verify game window position
+    from .calibrate import extract_button_templates
+
+    print("Checking game window position...")
+    status, result = verify_window_position(config=config)
+
+    if status == "ok":
+        print("Game window found at expected position.")
+    elif status == "moved":
+        old_x, old_y = config["game_x"], config["game_y"]
+        config = result
+        save_config(config=config)
+        print(f"Game window moved from ({old_x}, {old_y}) to ({config['game_x']}, {config['game_y']}).")
+        print("Position updated automatically -- no recalibration needed.")
+    elif status == "resized":
+        print("Could not find the game window.")
+        print()
+        print("Make sure the game is visible on the main screen (with")
+        print("Adventure/Craft/Battle buttons showing), then either:")
+        print()
+        print("  - Restart the bot if the game is open and visible")
+        print("  - Run: last-meadow-online-bot --calibrate")
+        print("    (required if the window was resized)")
+        print()
+        sys.exit(1)
+
+    # Always re-extract button templates to ensure they match the current screen
+    extract_button_templates(config=config)
+
+    print()
     print("Game bot ready. F8 to start, Escape to pause, Enter to resume, Ctrl+C to quit.")
 
     running_event = threading.Event()

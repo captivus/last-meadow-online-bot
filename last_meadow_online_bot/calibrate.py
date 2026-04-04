@@ -1,7 +1,7 @@
 """Calibration wizard for the game bot.
 
-Extracts templates directly from the user's live screen to ensure
-accurate template matching at any resolution and aspect ratio.
+Extracts button and Continue templates directly from the user's live screen.
+Arrow detection uses bundled reference templates at runtime (no calibration needed).
 """
 
 import cv2
@@ -30,103 +30,23 @@ def capture_game_region(region_name, config):
 
 
 def extract_button_templates(config):
-    """Extract Craft and Battle button templates from the main screen."""
-    CALIBRATED_TEMPLATE_DIR.mkdir(parents=True, exist_ok=True)
+    """Extract Craft and Battle button templates from the main screen.
 
-    for button_name in ["craft_button", "battle_button"]:
-        screen = capture_game_region(region_name=button_name, config=config)
-        # The button fills most of the region, save the whole capture
-        path = CALIBRATED_TEMPLATE_DIR / f"{button_name}.png"
-        cv2.imwrite(filename=str(path), img=screen)
-
-    return True
-
-
-def extract_arrow_templates(config):
-    """Extract individual arrow templates from the crafting screen.
-
-    Detects dark arrow-shaped contours in the arrow region and classifies
-    each by its shape (which direction it points).
+    Templates are cropped with a margin inset so they're smaller than
+    their regions, giving matchTemplate room for alignment tolerance.
     """
     CALIBRATED_TEMPLATE_DIR.mkdir(parents=True, exist_ok=True)
 
-    screen = capture_game_region(region_name="arrow", config=config)
+    margin = 5  # pixels to inset on each side
 
-    # Find dark contours (the arrows)
-    _, thresh = cv2.threshold(src=screen, thresh=100, maxval=255, type=cv2.THRESH_BINARY_INV)
-    contours, _ = cv2.findContours(
-        image=thresh,
-        mode=cv2.RETR_EXTERNAL,
-        method=cv2.CHAIN_APPROX_SIMPLE,
-    )
+    for button_name in ["craft_button", "battle_button"]:
+        screen = capture_game_region(region_name=button_name, config=config)
+        h, w = screen.shape[:2]
+        # Inset the template so it's smaller than the region
+        cropped = screen[margin:h - margin, margin:w - margin]
+        path = CALIBRATED_TEMPLATE_DIR / f"{button_name}.png"
+        cv2.imwrite(filename=str(path), img=cropped)
 
-    # Filter to arrow-sized contours and sort left to right
-    min_size = screen.shape[0] * 0.3  # arrows should be at least 30% of region height
-    boxes = []
-    for c in contours:
-        x, y, w, h = cv2.boundingRect(array=c)
-        if w > min_size and h > min_size:
-            boxes.append((x, y, w, h))
-
-    boxes.sort(key=lambda b: b[0])
-
-    if len(boxes) < 4:
-        print(f"        Warning: Only found {len(boxes)} arrow candidates (need at least 4).")
-        return False
-
-    # Classify each arrow by analyzing which direction it points.
-    # Compare the center of mass to the bounding box center:
-    # - Right arrow: center of mass is left of bbox center (body is left, point is right)
-    # - Left arrow: center of mass is right of bbox center
-    # - Up arrow: center of mass is below bbox center
-    # - Down arrow: center of mass is above bbox center
-    saved = {"up": False, "down": False, "left": False, "right": False}
-
-    for x, y, w, h in boxes:
-        # Extract the arrow region from the thresholded image
-        arrow_mask = thresh[y:y + h, x:x + w]
-        moments = cv2.moments(array=arrow_mask)
-
-        if moments["m00"] == 0:
-            continue
-
-        cx = moments["m10"] / moments["m00"]
-        cy = moments["m01"] / moments["m00"]
-
-        # Relative position of center of mass within bounding box
-        rel_cx = cx / w
-        rel_cy = cy / h
-
-        # Classify based on center of mass offset
-        dx = rel_cx - 0.5
-        dy = rel_cy - 0.5
-
-        if abs(dx) > abs(dy):
-            direction = "left" if dx > 0 else "right"
-        else:
-            direction = "up" if dy > 0 else "down"
-
-        if not saved[direction]:
-            # Crop from the original grayscale with small padding
-            pad = 2
-            crop_y1 = max(0, y - pad)
-            crop_y2 = min(screen.shape[0], y + h + pad)
-            crop_x1 = max(0, x - pad)
-            crop_x2 = min(screen.shape[1], x + w + pad)
-            arrow_img = screen[crop_y1:crop_y2, crop_x1:crop_x2]
-
-            path = CALIBRATED_TEMPLATE_DIR / f"{direction}.png"
-            cv2.imwrite(filename=str(path), img=arrow_img)
-            saved[direction] = True
-
-    found = [d for d, s in saved.items() if s]
-    missing = [d for d, s in saved.items() if not s]
-
-    if missing:
-        print(f"        Warning: Could not find arrows for: {', '.join(missing)}")
-        return False
-
-    print(f"        Extracted arrow templates: {', '.join(found)}")
     return True
 
 
@@ -134,16 +54,14 @@ def extract_continue_template(config):
     """Extract the Continue button template from a success screen.
 
     The Continue button is a small bordered rectangle with text,
-    located in the lower portion of the continue region. We look
-    for a wide-ish contour in the bottom half that's not too large
-    (to avoid matching the reward box above it).
+    located in the lower portion of the continue region.
     """
     CALIBRATED_TEMPLATE_DIR.mkdir(parents=True, exist_ok=True)
 
     screen = capture_game_region(region_name="continue", config=config)
     height, width = screen.shape[:2]
 
-    # Only look in the bottom half of the region (Continue is below the reward box)
+    # Only look in the bottom half (Continue is below the reward box)
     bottom_half = screen[height // 2:, :]
 
     _, thresh = cv2.threshold(src=bottom_half, thresh=100, maxval=255, type=cv2.THRESH_BINARY_INV)
@@ -155,7 +73,7 @@ def extract_continue_template(config):
 
     # Find a contour that looks like a button:
     # - wider than tall
-    # - not too large (less than 60% of region width — excludes reward box)
+    # - not too large (less than 60% of region width -- excludes reward box)
     # - not too small
     best = None
     best_area = 0
@@ -277,17 +195,9 @@ def run_calibration():
         print("        Make sure the game is fully visible on the main screen.")
     print()
 
-    # Step 5: Extract arrow templates from the crafting screen
-    print("Step 5: Click the Craft button in the game to open the crafting screen.")
-    print("        Wait until the arrow sequence is fully visible.")
-    input("        Press Enter when you see the arrows... ")
-    print("        Extracting arrow templates...")
-    arrows_ok = extract_arrow_templates(config=config)
-    print()
-
-    # Step 6: Complete the craft and extract Continue template
-    print("Step 6: Complete the arrow sequence (press the keys manually).")
-    print("        Wait until you see the success screen with the Continue button.")
+    # Step 5: Extract Continue template
+    print("Step 5: Click the Craft button in the game, complete the arrow sequence,")
+    print("        and wait for the success screen with the Continue button.")
     input("        Press Enter when you see Continue... ")
     print("        Extracting Continue template...")
     continue_ok = extract_continue_template(config=config)
@@ -300,7 +210,7 @@ def run_calibration():
     print(f"Calibration saved to {CALIBRATED_TEMPLATE_DIR.parent}/")
     print()
 
-    if arrows_ok and continue_ok and detected:
+    if continue_ok and detected:
         print("Calibration complete! You can now run: last-meadow-online-bot")
     else:
         print("Calibration saved with warnings. The bot may need re-calibration.")
