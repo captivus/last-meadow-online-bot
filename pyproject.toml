@@ -1,6 +1,6 @@
 [project]
 name = "last-meadow-online-bot"
-version = "0.2.1"
+version = "0.2.2"
 description = "Automated game bot for Last Meadow Online"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -27,8 +27,8 @@ Repository = "https://github.com/captivus/last-meadow-online-bot"
 last-meadow-online-bot = "last_meadow_online_bot.main:main"
 
 [build-system]
-requires = ["setuptools>=75.0"]
-build-backend = "setuptools.build_meta"
+requires = ["uv_build>=0.9.17,<0.10.0"]
+build-backend = "uv_build"
 
-[tool.setuptools.package-data]
-last_meadow_online_bot = ["templates/*.png"]
+[tool.uv.build-backend]
+module-root = ""
